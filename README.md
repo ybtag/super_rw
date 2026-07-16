@@ -93,6 +93,11 @@ sudo python3 super_rw.py expand super-work system_a vendor_a --grow-by 2GiB --mo
 adds the requested headroom. COW, EROFS, F2FS, SquashFS, and unknown images are
 skipped.
 
+The expansion pass attempts every selected ext4 partition even if one fails.
+It reports a combined nonzero result at the end, including the failed names and
+the number successfully expanded. Successful images remain expanded and are
+recorded in the workspace manifest.
+
 The mount pass attempts every selected ext4 partition even if one fails. It
 reports a combined nonzero result at the end, including the failed names and the
 number successfully mounted.

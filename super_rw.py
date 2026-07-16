@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-SCRIPT_VERSION = "1.1.1"
+SCRIPT_VERSION = "1.1.2"
 MANIFEST_VERSION = 1
 MANIFEST_NAME = "super_rw_manifest.json"
 
@@ -790,7 +790,10 @@ def mount_workspace(
             # shared_blocks RO_COMPAT feature. Linux correctly refuses to mount
             # such an image rw until e2fsck materializes the shared blocks.
             unshare_ext4_blocks(image)
-            run(["mount", "-t", "ext4", "-o", "loop,rw", image, target])
+            run(
+                ["mount", "-t", "ext4", "-o", "loop,rw", image, target],
+                capture=True,
+            )
             info(f"Mounted {partition['name']} at {target}")
             mounted += 1
         except SuperRwError as exc:
@@ -807,9 +810,10 @@ def mount_workspace(
         info("No new ext4 images were mounted")
     if failures:
         failed_names = ", ".join(name for name, _ in failures)
+        details = "; ".join(f"{name}: {reason}" for name, reason in failures)
         raise SuperRwError(
             f"Mount pass finished with {len(failures)} failure(s): {failed_names}. "
-            f"Successfully mounted {mounted} new image(s)."
+            f"Successfully mounted {mounted} new image(s). Details: {details}"
         )
 
 
@@ -1732,27 +1736,40 @@ def command_expand(args: argparse.Namespace) -> None:
             )
 
     expanded = 0
+    failures: list[tuple[str, str]] = []
     for partition in manifest["partitions"]:
         if selected and partition["name"] not in selected and partition["raw_name"] not in selected:
             continue
-        image = partition_image(workspace, partition)
-        if not image.is_file():
-            raise SuperRwError(f"Partition image is missing: {image}")
-        current_type = classify_image(image, partition["raw_name"], partition["name"])
-        if current_type != "ext4":
-            info(f"Skipping non-ext4 partition: {partition['name']} ({current_type})")
-            continue
-        grow_ext4(
-            image,
-            args.grow_by,
-            minimum_base_size=partition["original_partition_size"],
-        )
-        partition["expanded"] = True
-        partition["expanded_image_size"] = image.stat().st_size
-        expanded += 1
-        save_manifest(workspace, manifest)
+        name = partition["name"]
+        try:
+            image = partition_image(workspace, partition)
+            if not image.is_file():
+                raise SuperRwError(f"Partition image is missing: {image}")
+            current_type = classify_image(image, partition["raw_name"], name)
+            if current_type != "ext4":
+                info(f"Skipping non-ext4 partition: {name} ({current_type})")
+                continue
+            grow_ext4(
+                image,
+                args.grow_by,
+                minimum_base_size=partition["original_partition_size"],
+            )
+            partition["expanded"] = True
+            partition["expanded_image_size"] = image.stat().st_size
+            expanded += 1
+            save_manifest(workspace, manifest)
+        except (SuperRwError, OSError) as exc:
+            failures.append((name, str(exc)))
+            warn(f"Could not expand {name}; continuing with the rest: {exc}")
 
     if not expanded:
+        if failures:
+            failed_names = ", ".join(name for name, _ in failures)
+            details = "; ".join(f"{name}: {reason}" for name, reason in failures)
+            raise SuperRwError(
+                f"Expand pass finished with {len(failures)} failure(s): {failed_names}. "
+                f"Successfully expanded {expanded} ext4 image(s). Details: {details}"
+            )
         raise SuperRwError("No selected ext4 partition images were available to expand")
 
     manifest["last_expand_utc"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
@@ -1760,7 +1777,17 @@ def command_expand(args: argparse.Namespace) -> None:
     save_manifest(workspace, manifest)
     info(f"Expanded {expanded} ext4 partition image(s)")
     if args.mount:
-        mount_workspace(workspace, manifest, selected)
+        try:
+            mount_workspace(workspace, manifest, selected)
+        except SuperRwError as exc:
+            failures.append(("mount", str(exc)))
+    if failures:
+        failed_names = ", ".join(name for name, _ in failures)
+        details = "; ".join(f"{name}: {reason}" for name, reason in failures)
+        raise SuperRwError(
+            f"Expand pass finished with {len(failures)} failure(s): {failed_names}. "
+            f"Successfully expanded {expanded} ext4 image(s). Details: {details}"
+        )
 
 
 def command_unmount(args: argparse.Namespace) -> None:
